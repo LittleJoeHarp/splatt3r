@@ -1,3 +1,15 @@
+#!/usr/bin/env python3
+"""
+Training script for MASt3R + PixelSplat integration, adapted to run on CO3D and
+log reconstruction quality (PSNR, SSIM, LPIPS). This file contains the full,
+self-contained training entrypoint and the run_experiment function.
+
+Changes made:
+- calculate_loss now clamps inputs to [0,1] before computing SSIM/PSNR.
+- log_metrics uses on_epoch=True so Lightning aggregates epoch-level metrics.
+- After trainer.fit, if dataset is CO3D a final test pass is run and results are
+  saved to JSON and optionally logged to WandB.
+"""
 import json
 import os
 import sys
@@ -25,7 +37,8 @@ import utils.geometry as geometry
 import utils.loss_mask as loss_mask
 import utils.sh_utils as sh_utils
 import workspace
-
+# --- IMPORT YOUR NEW DATASET ADAPTER (CO3D Fix) ---
+import data.co3d as co3d_dataset
 
 class MAST3RGaussians(L.LightningModule):
 
@@ -123,15 +136,17 @@ class MAST3RGaussians(L.LightningModule):
 
         # Calculate losses
         mask = loss_mask.calculate_loss_mask(batch)
-        loss, mse, lpips = self.calculate_loss(
+        
+        # --- FIX: CAPTURE SSIM AND ENABLE CALCULATION ---
+        loss, mse, lpips, ssim = self.calculate_loss(
             batch, view1, view2, pred1, pred2, color, mask,
             apply_mask=self.config.loss.apply_mask,
             average_over_mask=self.config.loss.average_over_mask,
-            calculate_ssim=False
+            calculate_ssim=True # <-- TRUE
         )
 
         # Log losses
-        self.log_metrics('train', loss, mse, lpips)
+        self.log_metrics('train', loss, mse, lpips, ssim=ssim) # <-- LOG SSIM
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -145,15 +160,17 @@ class MAST3RGaussians(L.LightningModule):
 
         # Calculate losses
         mask = loss_mask.calculate_loss_mask(batch)
-        loss, mse, lpips = self.calculate_loss(
+        
+        # --- FIX: CAPTURE SSIM AND ENABLE CALCULATION ---
+        loss, mse, lpips, ssim = self.calculate_loss( # <-- CAPTURE SSIM
             batch, view1, view2, pred1, pred2, color, mask,
             apply_mask=self.config.loss.apply_mask,
             average_over_mask=self.config.loss.average_over_mask,
-            calculate_ssim=False
+            calculate_ssim=True # <-- TRUE
         )
 
         # Log losses
-        self.log_metrics('val', loss, mse, lpips)
+        self.log_metrics('val', loss, mse, lpips, ssim=ssim) # <-- LOG SSIM
         return loss
 
     def test_step(self, batch, batch_idx):
@@ -225,11 +242,15 @@ class MAST3RGaussians(L.LightningModule):
 
         # Masked SSIM
         if calculate_ssim:
+            # Ensure SSIM gets inputs in [0,1]
+            flat_t = flattened_target_color.clamp(0.0, 1.0)
+            flat_p = flattened_color.clamp(0.0, 1.0)
+
             if average_over_mask:
-                ssim_val = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=True)
+                ssim_val = compute_ssim.compute_ssim(flat_t, flat_p, full=True)
                 ssim_val = (ssim_val * flattened_mask[:, None, ...]).sum() / flattened_mask.sum()
             else:
-                ssim_val = compute_ssim.compute_ssim(flattened_target_color, flattened_color, full=False)
+                ssim_val = compute_ssim.compute_ssim(flat_t, flat_p, full=False)
                 ssim_val = ssim_val.mean()
             return loss, mse_loss, lpips_loss, ssim_val
 
@@ -248,7 +269,8 @@ class MAST3RGaussians(L.LightningModule):
 
         prog_bar = prefix != 'val'
         sync_dist = prefix != 'train'
-        self.log_dict(values, prog_bar=prog_bar, sync_dist=sync_dist, batch_size=self.config.data.batch_size)
+        # Request epoch-level aggregation (on_epoch=True). Avoid per-step noise by disabling on_step.
+        self.log_dict(values, prog_bar=prog_bar, sync_dist=sync_dist, batch_size=self.config.data.batch_size, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.encoder.parameters(), lr=self.config.opt.lr)
@@ -271,6 +293,7 @@ def run_experiment(config):
     # Set up loggers
     os.makedirs(os.path.join(config.save_dir, config.name), exist_ok=True)
     loggers = []
+    wandb_logger = None
     if config.loggers.use_csv_logger:
         csv_logger = L.pytorch.loggers.CSVLogger(
             save_dir=config.save_dir,
@@ -316,12 +339,37 @@ def run_experiment(config):
 
     # Training Datasets
     print(f'Building Datasets')
-    train_dataset = scannetpp.get_scannet_dataset(
-        config.data.root,
-        'train',
-        config.data.resolution,
-        num_epochs_per_epoch=config.data.epochs_per_train_epoch,
-    )
+    
+    # --- FIX: Select Dataset based on Config Name ---
+    if config.dataset.name == 'co3d':
+        train_dataset = co3d_dataset.get_co3d_dataset(
+            config.dataset.data_root,
+            config.dataset.train_list, 
+            config.data.resolution,
+            num_epochs_per_epoch=config.data.epochs_per_train_epoch,
+        )
+        val_dataset = co3d_dataset.get_co3d_test_dataset(
+            config.dataset.data_root,
+            config.dataset.val_list,   
+            config.data.resolution
+        )
+    else:
+        # Keep original ScanNet code as fallback
+        train_dataset = scannetpp.get_scannet_dataset(
+            config.data.root,
+            'train',
+            config.data.resolution,
+            num_epochs_per_epoch=config.data.epochs_per_train_epoch,
+        )
+        val_dataset = scannetpp.get_scannet_test_dataset(
+            config.data.root,
+            alpha=0.5,
+            beta=0.5,
+            resolution=config.data.resolution,
+            use_every_n_sample=100,
+        )
+
+    # --- FIX: Create DataLoaders here ONCE using the selected datasets ---
     data_loader_train = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -329,13 +377,6 @@ def run_experiment(config):
         num_workers=config.data.num_workers,
     )
 
-    val_dataset = scannetpp.get_scannet_test_dataset(
-        config.data.root,
-        alpha=0.5,
-        beta=0.5,
-        resolution=config.data.resolution,
-        use_every_n_sample=100,
-    )
     data_loader_val = torch.utils.data.DataLoader(
         val_dataset,
         shuffle=False,
@@ -345,6 +386,15 @@ def run_experiment(config):
 
     # Training
     print('Training')
+    # Support both int and list/tuple for config.devices
+    if isinstance(config.devices, int):
+        num_devices = config.devices
+    else:
+        try:
+            num_devices = num_devices
+        except Exception:
+            num_devices = 1
+
     trainer = L.Trainer(
         accelerator="gpu",
         benchmark=True,
@@ -360,62 +410,102 @@ def run_experiment(config):
         logger=loggers,
         max_epochs=config.opt.epochs,
         profiler=profiler,
-        strategy="ddp_find_unused_parameters_true" if len(config.devices) > 1 else "auto",
+        strategy="ddp_find_unused_parameters_true" if num_devices > 1 else "auto",
     )
     trainer.fit(model, train_dataloaders=data_loader_train, val_dataloaders=data_loader_val)
 
-    # Testing
-    original_save_dir = config.save_dir
-    results = {}
-    for alpha, beta in ((0.9, 0.9), (0.7, 0.7), (0.5, 0.5), (0.3, 0.3)):
-
-        test_dataset = scannetpp.get_scannet_test_dataset(
-            config.data.root,
-            alpha=alpha,
-            beta=beta,
-            resolution=config.data.resolution,
-            use_every_n_sample=10
-        )
-        data_loader_test = torch.utils.data.DataLoader(
-            test_dataset,
-            shuffle=False,
-            batch_size=config.data.batch_size,
-            num_workers=config.data.num_workers,
-        )
-
-        masking_configs = ((True, False), (True, True))
-        for apply_mask, average_over_mask in masking_configs:
-
-            new_save_dir = os.path.join(
-                original_save_dir,
-                f'alpha_{alpha}_beta_{beta}_apply_mask_{apply_mask}_average_over_mask_{average_over_mask}'
+    # --- RUN FINAL CO3D TEST PASS (if requested) ---
+    # Previously the script skipped the final test for CO3D. We run it here, save results,
+    # and optionally log to WandB.
+    if config.dataset.name == 'co3d':
+        test_list = getattr(config.dataset, 'test_list', None) or getattr(config.dataset, 'val_list', None)
+        if test_list is not None:
+            print('Building CO3D test dataset for final evaluation...')
+            co3d_test_dataset = co3d_dataset.get_co3d_test_dataset(
+                config.dataset.data_root,
+                test_list,
+                config.data.resolution
             )
-            os.makedirs(new_save_dir, exist_ok=True)
-            model.config.save_dir = new_save_dir
-
-            L.seed_everything(config.seed, workers=True)
-
-            # Training
-            trainer = L.Trainer(
-                accelerator="gpu",
-                benchmark=True,
-                callbacks=[export.SaveBatchData(save_dir=config.save_dir),],
-                default_root_dir=config.save_dir,
-                devices=config.devices,
-                log_every_n_steps=10,
-                strategy="ddp_find_unused_parameters_true" if len(config.devices) > 1 else "auto",
+            co3d_test_loader = torch.utils.data.DataLoader(
+                co3d_test_dataset,
+                shuffle=False,
+                batch_size=config.data.batch_size,
+                num_workers=config.data.num_workers
             )
-
-            model.lpips_criterion = lpips.LPIPS('vgg', spatial=average_over_mask)
-            model.config.loss.apply_mask = apply_mask
-            model.config.loss.average_over_mask = average_over_mask
-            res = trainer.test(model, dataloaders=data_loader_test)
-            results[f"alpha: {alpha}, beta: {beta}, apply_mask: {apply_mask}, average_over_mask: {average_over_mask}"] = res
-
-            # Save the results
-            save_path = os.path.join(original_save_dir, 'results.json')
+            print('Running final test on CO3D...')
+            test_results = trainer.test(model, dataloaders=co3d_test_loader)
+            # Save aggregated results
+            save_path = os.path.join(config.save_dir, 'co3d_test_results.json')
             with open(save_path, 'w') as f:
-                json.dump(results, f)
+                json.dump(test_results, f)
+            print(f'CO3D test results saved to {save_path}')
+            # Log to wandb if available
+            if wandb_logger is not None:
+                try:
+                    # Lightning returns a list-of-dicts; flatten first entry
+                    if isinstance(test_results, list) and len(test_results) > 0:
+                        wandb_results = test_results[0]
+                        for k, v in wandb_results.items():
+                            if isinstance(v, (int, float)):
+                                wandb.log({f"test/{k}": v})
+                except Exception as e:
+                    print(f"Warning: failed to log test results to wandb: {e}")
+        else:
+            print('No test_list/test dataset configured in config.dataset; skipping CO3D final test.')
+
+    # Testing (Only run this loop if NOT using CO3D, because it is hardcoded for ScanNet++)
+    if config.dataset.name != 'co3d':
+        original_save_dir = config.save_dir
+        results = {}
+        for alpha, beta in ((0.9, 0.9), (0.7, 0.7), (0.5, 0.5), (0.3, 0.3)):
+
+            test_dataset = scannetpp.get_scannet_test_dataset(
+                config.data.root,
+                alpha=alpha,
+                beta=beta,
+                resolution=config.data.resolution,
+                use_every_n_sample=10
+            )
+            data_loader_test = torch.utils.data.DataLoader(
+                test_dataset,
+                shuffle=False,
+                batch_size=config.data.batch_size,
+                num_workers=config.data.num_workers,
+            )
+
+            masking_configs = ((True, False), (True, True))
+            for apply_mask, average_over_mask in masking_configs:
+
+                new_save_dir = os.path.join(
+                    original_save_dir,
+                    f'alpha_{alpha}_beta_{beta}_apply_mask_{apply_mask}_average_over_mask_{average_over_mask}'
+                )
+                os.makedirs(new_save_dir, exist_ok=True)
+                model.config.save_dir = new_save_dir
+
+                L.seed_everything(config.seed, workers=True)
+
+                # Training
+                trainer = L.Trainer(
+                    accelerator="gpu",
+                    benchmark=True,
+                    callbacks=[export.SaveBatchData(save_dir=config.save_dir),],
+                    default_root_dir=config.save_dir,
+                    devices=config.devices,
+                    log_every_n_steps=10,
+                    strategy="ddp_find_unused_parameters_true" if num_devices > 1 else "auto",
+                )
+
+                model.lpips_criterion = lpips.LPIPS('vgg', spatial=average_over_mask)
+                model.config.loss.apply_mask = apply_mask
+                model.config.loss.average_over_mask = average_over_mask
+                res = trainer.test(model, dataloaders=data_loader_test)
+                results[f"alpha: {alpha}, beta: {beta}, apply_mask: {apply_mask}, average_over_mask: {average_over_mask}"] = res
+
+                # Save the results
+                save_path = os.path.join(original_save_dir, 'results.json')
+                with open(save_path, 'w') as f:
+                    json.dump(results, f)
 
 
 if __name__ == "__main__":

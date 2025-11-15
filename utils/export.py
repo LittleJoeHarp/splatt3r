@@ -167,7 +167,7 @@ def log_batch_files(batch, color, depth, mask, view1, view2, pred1, pred2, save_
     os.makedirs(save_dir, exist_ok=True)
 
     # Save the 3D Gaussians as a .ply file
-    save_as_ply(pred1, pred2, os.path.join(save_dir, f"gaussians.ply"))
+    #save_as_ply(pred1, pred2, os.path.join(save_dir, f"gaussians.ply"))
 
     # Save the 3D points as a point cloud and as a mesh (disabled)
     if should_save_3d:

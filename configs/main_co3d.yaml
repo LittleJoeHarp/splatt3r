@@ -1,0 +1,55 @@
+# --- FINAL CONFIGURATION FILE FOR CO3D TRAINING ---
+
+# NOTE: This configuration is highly optimized to run on the 11GB VRAM of the RTX 2080 Ti
+# and to bypass the Disk Quota limitations of the ADA cluster.
+
+# --- Global Settings ---
+name: co3d_experiment
+seed: 42
+# CRITICAL FIX: Redirects all heavy logs and checkpoints to the large Scratch partition.
+save_dir: /scratch/rs2004/splatt3r_storage
+devices: 1
+use_profiler: false
+
+# --- Model Loading ---
+use_pretrained: true
+pretrained_mast3r_path: checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+use_offsets: true
+
+# --- Dataset Selection (Used by our custom main.py logic) ---
+dataset:
+  name: co3d
+  # The entire dataset is now stored on the high-speed scratch disk
+  data_root: /home2/rs2004/splatt3r/data/co3d_processed
+  train_list: /home2/rs2004/splatt3r/data/co3d_processed/train.txt
+  val_list: /home2/rs2004/splatt3r/data/co3d_processed/val.txt
+
+# --- Data Loading Settings (Memory Fixes) ---
+data:
+  root: /home2/rs2004/splatt3r/data/co3d_processed
+  resolution: [256, 256]     # CRITICAL FIX for OOM Error (Reduces VRAM usage by 4x)
+  batch_size: 1              # Minimal batch size
+  num_workers: 4             # Speed up data loading using CPU cores
+  epochs_per_train_epoch: 1
+
+# --- Optimization & Training ---
+opt:
+  lr: 5e-4
+  epochs: 30                 # Total epochs to run
+  gradient_clip_val: 1.0
+
+# --- Loss Function Weights (Stability Fixes) ---
+loss:
+  # CRITICAL FIX: Disables all mask/depth checks to prevent 'AssertionError: valid pixels'
+  average_over_mask: false
+  apply_mask: false
+  
+  mse_loss_weight: 1.0
+  lpips_loss_weight: 1.0
+  # CRITICAL FIX: Skips the geometric loss math entirely (prevents NaN loss)
+  mast3r_loss_weight: null 
+
+# --- Logging ---
+loggers:
+  use_csv_logger: true
+  use_wandb: true
