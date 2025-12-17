@@ -1,0 +1,108 @@
+# DINOv2 + MASt3R + CO3D Dataset - FAST TRAINING CONFIG
+# Optimized for quick iteration and testing on RTX 3050
+
+# Experiment name
+name: 'dinov2_co3d_fast_%Y-%m-%d-%H-%M-%S'
+save_dir: './results/dinov2_co3d_fast/${name}/'
+
+# ============================================================================
+# DATASET CONFIGURATION - REDUCED FOR SPEED
+# ============================================================================
+data:
+  # Dataset source
+  dataset: 'co3d'
+  
+  # Point to the CO3D folder
+  root: '../co3dv2_single'
+  
+  # Category (null = all categories)
+  category: null
+  
+  # REDUCED: Small batch size
+  batch_size: 1
+  
+  # REDUCED: Fewer workers for faster startup
+  num_workers: 2
+  
+  # REDUCED: Smaller input for faster processing
+  resolution: [224, 224]
+  
+  # REDUCED: Only sample subset per epoch
+  epochs_per_train_epoch: 1
+  
+  # Temporal sampling
+  temporal_gap_min: 5
+  temporal_gap_max: 10
+
+# ============================================================================
+# MODEL CONFIGURATION - SMALLER FOR SPEED
+# ============================================================================
+model:
+  # Enable DINOv2 but use smaller variant
+  use_dinov2_features: True
+  
+  # REDUCED: Use smaller DINOv2 model (vits14 instead of vitl14)
+  # vits14: 384 dims (faster)
+  # vitl14: 1024 dims (slower but better features)
+  dinov2_model: 'dinov2_vits14'
+  
+  # DINOv2 output dimensions
+  dinov2_dim: 384
+  
+  # Feature fusion strategy
+  dinov2_fusion_mode: 'addition'
+  
+  # Freeze DINOv2 weights
+  freeze_dinov2: True
+  
+  # MASt3R checkpoint
+  use_pretrained: True
+  pretrained_mast3r_path: './checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth'
+
+# Gaussian Head Input Dimension Configuration
+# MASt3R-Encoder(1024) + MASt3R-Decoder(768) + DINOv2-Small(384) = 2176
+gaussian_head_input_dim: 2176
+
+# ============================================================================
+# OPTIMIZATION CONFIGURATION - AGGRESSIVE FOR TESTING
+# ============================================================================
+opt:
+  # REDUCED: Quick test with fewer epochs
+  epochs: 2
+  
+  lr: 0.0001
+  weight_decay: 0.05
+  gradient_clip_val: 0.5
+  optimizer: 'adamw'
+
+# ============================================================================
+# LOSS CONFIGURATION
+# ============================================================================
+loss:
+  mse_loss_weight: 1.0
+  lpips_loss_weight: 0.25
+  # Disable MASt3R loss for speed
+  mast3r_loss_weight: null
+  apply_mask: True
+  average_over_mask: True
+
+# ============================================================================
+# LOGGING AND MONITORING
+# ============================================================================
+loggers:
+  use_csv_logger: True
+  use_wandb: True
+  wandb_tags: ['dinov2', 'co3d', 'mast3r', 'fast', 'testing']
+
+# ============================================================================
+# DEVICE AND DISTRIBUTED TRAINING
+# ============================================================================
+devices: 'auto'
+seed: 42
+
+# ============================================================================
+# SPLATT3R SPECIFIC CONFIGURATION
+# ============================================================================
+use_offsets: True
+sh_degree: 1
+use_profiler: False

@@ -1,0 +1,109 @@
+# DINOv2 + MASt3R + CO3D Dataset Experiment Configuration
+# This configuration enables DINOv2 feature extraction with the CO3D dataset
+
+# 'main.yaml' is not provided, so we define all keys here.
+# If 'main.yaml' exists, you might just need to override specific keys.
+
+# Experiment name
+name: 'dinov2_co3d_%Y-%m-%d-%H-%M-%S'
+save_dir: './results/dinov2_co3d/${name}/'
+
+# ============================================================================
+# DATASET CONFIGURATION
+# ============================================================================
+data:
+  # Dataset source
+  dataset: 'co3d'
+  
+  # FIXED: Point to the folder created in Step 1
+  root: '../co3dv2_single'
+  
+  # FIXED: Specify the category we downloaded
+  category: null
+  
+  # Reduced batch size due to DINOv2 + MASt3R memory requirements
+  batch_size: 1
+  
+  # Number of workers for data loading
+  num_workers: 0
+  
+  # Input image resolution
+  resolution: [224, 224]
+  
+  # How many times to sample from each scene per epoch
+  epochs_per_train_epoch: 50
+  
+  # Temporal sampling
+  temporal_gap_min: 5
+  temporal_gap_max: 10
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+model:
+  # Enable DINOv2 feature extraction
+  use_dinov2_features: True
+  
+  # DINOv2 variant
+  dinov2_model: 'dinov2_vits14'
+  
+  # DINOv2 output dimensions
+  # vitl14: 1024
+  dinov2_dim: 384
+  
+  # Feature fusion strategy (must match head dim)
+  dinov2_fusion_mode: 'addition'
+  
+  # Freeze DINOv2 weights
+  freeze_dinov2: True
+  
+  # MASt3R checkpoint
+  use_pretrained: True
+  pretrained_mast3r_path: './checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth'
+
+# Gaussian Head Input Dimension Configuration
+# CRITICAL: This matches the logic in main.py
+# MASt3R-Encoder(1024) + MASt3R-Decoder(768) + DINOv2-Large(1024) = 2816
+gaussian_head_input_dim: 2816
+
+# ============================================================================
+# OPTIMIZATION CONFIGURATION
+# ============================================================================
+opt:
+  epochs: 30
+  lr: 0.0001 # 1e-4
+  weight_decay: 0.05
+  gradient_clip_val: 0.5
+  optimizer: 'adamw'
+
+# ============================================================================
+# LOSS CONFIGURATION
+# ============================================================================
+loss:
+  mse_loss_weight: 1.0
+  lpips_loss_weight: 0.25
+  # Set to 0.1-0.5 to enable MASt3R geometry loss
+  mast3r_loss_weight: null 
+  apply_mask: True
+  average_over_mask: True
+
+# ============================================================================
+# LOGGING AND MONITORING
+# ============================================================================
+loggers:
+  use_csv_logger: True
+  use_wandb: True
+  wandb_tags: ['dinov2', 'co3d', 'mast3r']
+
+# ============================================================================
+# DEVICE AND DISTRIBUTED TRAINING
+# ============================================================================
+devices: 'auto'
+seed: 42
+
+# ============================================================================
+# SPLATT3R SPECIFIC CONFIGURATION
+# ============================================================================
+use_offsets: True
+sh_degree: 1
+use_profiler: False
